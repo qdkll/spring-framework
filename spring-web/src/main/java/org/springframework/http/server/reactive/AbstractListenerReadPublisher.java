@@ -1,11 +1,11 @@
 /*
- * Copyright 2002-2018 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *      https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -123,18 +123,22 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 	 * all data has been read.
 	 */
 	public void onAllDataRead() {
-		rsReadLogger.trace(getLogPrefix() + "onAllDataRead");
-		this.state.get().onAllDataRead(this);
+		State state = this.state.get();
+		if (rsReadLogger.isTraceEnabled()) {
+			rsReadLogger.trace(getLogPrefix() + "onAllDataRead [" + state + "]");
+		}
+		state.onAllDataRead(this);
 	}
 
 	/**
 	 * Sub-classes can call this to delegate container error notifications.
 	 */
 	public final void onError(Throwable ex) {
+		State state = this.state.get();
 		if (rsReadLogger.isTraceEnabled()) {
-			rsReadLogger.trace(getLogPrefix() + "Connection error: " + ex);
+			rsReadLogger.trace(getLogPrefix() + "onError: " + ex + " [" + state + "]");
 		}
-		this.state.get().onError(this, ex);
+		state.onError(this, ex);
 	}
 
 
@@ -163,6 +167,14 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 	 */
 	protected abstract void readingPaused();
 
+	/**
+	 * Invoked after an I/O read error from the underlying server or after a
+	 * cancellation signal from the downstream consumer to allow sub-classes
+	 * to discard any current cached data they might have.
+	 * @since 5.0.11
+	 */
+	protected abstract void discardData();
+
 
 	// Private methods for use in State...
 
@@ -183,13 +195,13 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 				Subscriber<? super T> subscriber = this.subscriber;
 				Assert.state(subscriber != null, "No subscriber");
 				if (rsReadLogger.isTraceEnabled()) {
-					rsReadLogger.trace(getLogPrefix() + "Publishing data read");
+					rsReadLogger.trace(getLogPrefix() + "Publishing " + data.getClass().getSimpleName());
 				}
 				subscriber.onNext(data);
 			}
 			else {
 				if (rsReadLogger.isTraceEnabled()) {
-					rsReadLogger.trace(getLogPrefix() + "No more data to read");
+					rsReadLogger.trace(getLogPrefix() + "No more to read");
 				}
 				return true;
 			}
@@ -216,6 +228,23 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 		}
 	}
 
+	private void handleCompletionOrErrorBeforeDemand() {
+		State state = this.state.get();
+		if (!state.equals(State.UNSUBSCRIBED) && !state.equals(State.SUBSCRIBING)) {
+			if (this.completionBeforeDemand) {
+				rsReadLogger.trace(getLogPrefix() + "Completed before demand");
+				this.state.get().onAllDataRead(this);
+			}
+			Throwable ex = this.errorBeforeDemand;
+			if (ex != null) {
+				if (rsReadLogger.isTraceEnabled()) {
+					rsReadLogger.trace(getLogPrefix() + "Completed with error before demand: " + ex);
+				}
+				this.state.get().onError(this, ex);
+			}
+		}
+	}
+
 	private Subscription createSubscription() {
 		return new ReadSubscription();
 	}
@@ -230,17 +259,18 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 		@Override
 		public final void request(long n) {
 			if (rsReadLogger.isTraceEnabled()) {
-				rsReadLogger.trace(getLogPrefix() + n + " requested");
+				rsReadLogger.trace(getLogPrefix() + "request " + (n != Long.MAX_VALUE ? n : "Long.MAX_VALUE"));
 			}
 			state.get().request(AbstractListenerReadPublisher.this, n);
 		}
 
 		@Override
 		public final void cancel() {
+			State state = AbstractListenerReadPublisher.this.state.get();
 			if (rsReadLogger.isTraceEnabled()) {
-				rsReadLogger.trace(getLogPrefix() + "Cancellation");
+				rsReadLogger.trace(getLogPrefix() + "cancel [" + state + "]");
 			}
-			state.get().cancel(AbstractListenerReadPublisher.this);
+			state.cancel(AbstractListenerReadPublisher.this);
 		}
 	}
 
@@ -275,19 +305,7 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 					publisher.subscriber = subscriber;
 					subscriber.onSubscribe(subscription);
 					publisher.changeState(SUBSCRIBING, NO_DEMAND);
-					// Now safe to check "beforeDemand" flags, they won't change once in NO_DEMAND
-					String logPrefix = publisher.getLogPrefix();
-					if (publisher.completionBeforeDemand) {
-						rsReadLogger.trace(logPrefix + "Completed before demand");
-						publisher.state.get().onAllDataRead(publisher);
-					}
-					Throwable ex = publisher.errorBeforeDemand;
-					if (ex != null) {
-						if (rsReadLogger.isTraceEnabled()) {
-							rsReadLogger.trace(logPrefix + "Completed with error before demand: " + ex);
-						}
-						publisher.state.get().onError(publisher, ex);
-					}
+					publisher.handleCompletionOrErrorBeforeDemand();
 				}
 				else {
 					throw new IllegalStateException("Failed to transition to SUBSCRIBING, " +
@@ -298,11 +316,13 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 			@Override
 			<T> void onAllDataRead(AbstractListenerReadPublisher<T> publisher) {
 				publisher.completionBeforeDemand = true;
+				publisher.handleCompletionOrErrorBeforeDemand();
 			}
 
 			@Override
 			<T> void onError(AbstractListenerReadPublisher<T> publisher, Throwable ex) {
 				publisher.errorBeforeDemand = ex;
+				publisher.handleCompletionOrErrorBeforeDemand();
 			}
 		},
 
@@ -322,11 +342,13 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 			@Override
 			<T> void onAllDataRead(AbstractListenerReadPublisher<T> publisher) {
 				publisher.completionBeforeDemand = true;
+				publisher.handleCompletionOrErrorBeforeDemand();
 			}
 
 			@Override
 			<T> void onError(AbstractListenerReadPublisher<T> publisher, Throwable ex) {
 				publisher.errorBeforeDemand = ex;
+				publisher.handleCompletionOrErrorBeforeDemand();
 			}
 		},
 
@@ -416,7 +438,10 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 		}
 
 		<T> void cancel(AbstractListenerReadPublisher<T> publisher) {
-			if (!publisher.changeState(this, COMPLETED)) {
+			if (publisher.changeState(this, COMPLETED)) {
+				publisher.discardData();
+			}
+			else {
 				publisher.state.get().cancel(publisher);
 			}
 		}
@@ -439,6 +464,7 @@ public abstract class AbstractListenerReadPublisher<T> implements Publisher<T> {
 
 		<T> void onError(AbstractListenerReadPublisher<T> publisher, Throwable t) {
 			if (publisher.changeState(this, COMPLETED)) {
+				publisher.discardData();
 				Subscriber<? super T> s = publisher.subscriber;
 				if (s != null) {
 					s.onError(t);

@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *      https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -82,8 +82,8 @@ public class BeanFactoryAdvisorRetrievalHelper {
 		for (String name : advisorNames) {
 			if (isEligibleBean(name)) {
 				if (this.beanFactory.isCurrentlyInCreation(name)) {
-					if (logger.isDebugEnabled()) {
-						logger.debug("Skipping currently created advisor '" + name + "'");
+					if (logger.isTraceEnabled()) {
+						logger.trace("Skipping currently created advisor '" + name + "'");
 					}
 				}
 				else {
@@ -96,8 +96,8 @@ public class BeanFactoryAdvisorRetrievalHelper {
 							BeanCreationException bce = (BeanCreationException) rootCause;
 							String bceBeanName = bce.getBeanName();
 							if (bceBeanName != null && this.beanFactory.isCurrentlyInCreation(bceBeanName)) {
-								if (logger.isDebugEnabled()) {
-									logger.debug("Skipping advisor '" + name +
+								if (logger.isTraceEnabled()) {
+									logger.trace("Skipping advisor '" + name +
 											"' with dependency on currently created bean: " + ex.getMessage());
 								}
 								// Ignore: indicates a reference back to the bean we're trying to advise.

@@ -1,11 +1,11 @@
 /*
- * Copyright 2002-2018 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *      https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,11 +18,14 @@ package org.springframework.web.reactive.handler;
 
 import java.util.Map;
 
+import org.apache.commons.logging.Log;
 import reactor.core.publisher.Mono;
 
 import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.context.support.ApplicationObjectSupport;
 import org.springframework.core.Ordered;
+import org.springframework.core.log.LogDelegateFactory;
+import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.web.cors.CorsConfiguration;
@@ -48,12 +51,17 @@ import org.springframework.web.util.pattern.PathPatternParser;
 public abstract class AbstractHandlerMapping extends ApplicationObjectSupport
 		implements HandlerMapping, Ordered, BeanNameAware {
 
-	private static final WebHandler REQUEST_HANDLED_HANDLER = exchange -> Mono.empty();
+	private static final WebHandler NO_OP_HANDLER = exchange -> Mono.empty();
+
+	/** Dedicated "hidden" logger for request mappings. */
+	protected final Log mappingsLogger =
+			LogDelegateFactory.getHiddenLog(HandlerMapping.class.getName() + ".Mappings");
 
 
 	private final PathPatternParser patternParser;
 
-	private final UrlBasedCorsConfigurationSource globalCorsConfigSource;
+	@Nullable
+	private CorsConfigurationSource corsConfigurationSource;
 
 	private CorsProcessor corsProcessor = new DefaultCorsProcessor();
 
@@ -65,7 +73,6 @@ public abstract class AbstractHandlerMapping extends ApplicationObjectSupport
 
 	public AbstractHandlerMapping() {
 		this.patternParser = new PathPatternParser();
-		this.globalCorsConfigSource = new UrlBasedCorsConfigurationSource(this.patternParser);
 	}
 
 
@@ -107,12 +114,31 @@ public abstract class AbstractHandlerMapping extends ApplicationObjectSupport
 	}
 
 	/**
-	 * Set "global" CORS configuration based on URL patterns. By default the
-	 * first matching URL pattern is combined with handler-level CORS
-	 * configuration if any.
+	 * Set the "global" CORS configurations based on URL patterns. By default the
+	 * first matching URL pattern is combined with handler-level CORS configuration if any.
+	 * @see #setCorsConfigurationSource(CorsConfigurationSource)
 	 */
 	public void setCorsConfigurations(Map<String, CorsConfiguration> corsConfigurations) {
-		this.globalCorsConfigSource.setCorsConfigurations(corsConfigurations);
+		Assert.notNull(corsConfigurations, "corsConfigurations must not be null");
+		if (!corsConfigurations.isEmpty()) {
+			UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource(this.patternParser);
+			source.setCorsConfigurations(corsConfigurations);
+			this.corsConfigurationSource = source;
+		}
+		else {
+			this.corsConfigurationSource = null;
+		}
+	}
+
+	/**
+	 * Set the "global" CORS configuration source. By default the first matching URL
+	 * pattern is combined with the CORS configuration for the handler, if any.
+	 * @since 5.1
+	 * @see #setCorsConfigurations(Map)
+	 */
+	public void setCorsConfigurationSource(CorsConfigurationSource corsConfigurationSource) {
+		Assert.notNull(corsConfigurationSource, "corsConfigurationSource must not be null");
+		this.corsConfigurationSource = corsConfigurationSource;
 	}
 
 	/**
@@ -162,13 +188,17 @@ public abstract class AbstractHandlerMapping extends ApplicationObjectSupport
 			if (logger.isDebugEnabled()) {
 				logger.debug(exchange.getLogPrefix() + "Mapped to " + handler);
 			}
-			if (CorsUtils.isCorsRequest(exchange.getRequest())) {
-				CorsConfiguration configA = this.globalCorsConfigSource.getCorsConfiguration(exchange);
-				CorsConfiguration configB = getCorsConfiguration(handler, exchange);
-				CorsConfiguration config = (configA != null ? configA.combine(configB) : configB);
-				if (!getCorsProcessor().process(config, exchange) ||
-						CorsUtils.isPreFlightRequest(exchange.getRequest())) {
-					return REQUEST_HANDLED_HANDLER;
+			ServerHttpRequest request = exchange.getRequest();
+			if (hasCorsConfigurationSource(handler) || CorsUtils.isPreFlightRequest(request)) {
+				CorsConfiguration config = (this.corsConfigurationSource != null ?
+						this.corsConfigurationSource.getCorsConfiguration(exchange) : null);
+				CorsConfiguration handlerConfig = getCorsConfiguration(handler, exchange);
+				config = (config != null ? config.combine(handlerConfig) : handlerConfig);
+				if (config != null) {
+					config.validateAllowCredentials();
+				}
+				if (!this.corsProcessor.process(config, exchange) || CorsUtils.isPreFlightRequest(request)) {
+					return NO_OP_HANDLER;
 				}
 			}
 			return handler;
@@ -186,6 +216,14 @@ public abstract class AbstractHandlerMapping extends ApplicationObjectSupport
 	 * @return {@code Mono} for the matching handler, if any
 	 */
 	protected abstract Mono<?> getHandlerInternal(ServerWebExchange exchange);
+
+	/**
+	 * Return {@code true} if there is a {@link CorsConfigurationSource} for this handler.
+	 * @since 5.2
+	 */
+	protected boolean hasCorsConfigurationSource(Object handler) {
+		return (handler instanceof CorsConfigurationSource || this.corsConfigurationSource != null);
+	}
 
 	/**
 	 * Retrieve the CORS configuration for the given handler.
